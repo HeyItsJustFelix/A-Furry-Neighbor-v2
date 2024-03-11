@@ -10,6 +10,7 @@ import random
 from PIL import Image, ImageDraw, ImageFont
 import io
 import os
+import asyncio
 
 load_dotenv()
 botToken = os.getenv("BOT_TOKEN")
@@ -104,6 +105,14 @@ cur.execute('''
     )
 ''')
 
+cur.execute('''
+    CREATE TABLE IF NOT EXISTS LevelRoles (
+        roleId INTEGER,
+        serverId INTEGER,
+        level INTEGER
+    )
+''')
+
 conn.commit()
 
 
@@ -134,58 +143,32 @@ class aclient(discord.Client):
 
     @tasks.loop(seconds=15)
     async def approvalReminder(self):
-        if True == False:
-            cur.execute(f"SELECT * FROM UserApprovals WHERE stage = 0 AND curTime < {int(time.time()) - 86400}")
-            result = cur.fetchall()
-            for approval in result:
-                print(result)
-                try:
-                    user = bot.get_user(approval[0])
-                    print(user)
-                    if user != None:
-                        await user.send(f"It has been 24 hours since you joined! Please answer the questions in <#{approval[3]}> to be approved! If you do not approve within the next 24 hours, you will be automatically kicked from the server. If you have any questions, please contact a staff member.")
-                    else:
-                        break
-                    channel = bot.get_channel(approval[3])
-                    print(channel)
-                    if channel != None:
-                        await channel.send(f"24 hour reminder sent to {user.display_name}")
-                    else:
-                        break
-                except:
-                    channel = bot.get_channel(approval[3])
-                    print(channel)
-                    if channel != None:
-                        await channel.send(f"<@{approval[0]}> It has been 24 hours since you joined! Please answer the questions above to be approved! If you do not approve within the next 24 hours, you will be automatically kicked from the server. If you have any questions, please contact a staff member.")
-                print("doing this")
-                cur.execute("UPDATE UserApprovals SET stage = 1 WHERE userId = ? AND serverId = ?", (approval[0], approval[1]))
-                conn.commit()
+        cur.execute("SELECT * FROM UserApprovals WHERE (stage = 0 AND curTime < ?) OR (stage = 1 AND curTime < ? AND curTime != 0)", 
+                    (int(time.time()) - 86400, int(time.time()) - 172800))
+        results = cur.fetchall()
 
-            cur.execute(f"SELECT * FROM UserApprovals WHERE stage = 1 AND curTime < {int(time.time()) - 172800} AND curTime != 0")
-            result = cur.fetchall()
-            for approval in result:
-                print(result)
-                try:
-                    user = bot.get_user(approval[0])
-                    print(user)
-                    if user != None:
-                        await user.send("You have been inactive for 48 hours, you have been removed from the server. If you would like to rejoin, please use the invite link again and answer the questions in the approval channel!")
-                    else:
-                        pass
-                except:
-                    pass
-                channel = bot.get_channel(approval[3])
-                print(channel)
-                if channel != None:
-                    await channel.send(f"User has been inactive for 48 hours, they will be removed from the server")
-                try:
-                    guild = bot.get_guild(approval[1])
-                    user = bot.get_user(approval[0])
-                    await guild.kick(user = user)
-                except Exception as e:
-                    print(e)
-                    if channel != None:
-                        await channel.send("Unable to kick user, please do so manually")
+        for approval in results:
+            user = bot.get_user(approval[0])
+            channel = await bot.fetch_channel(approval[3])
+            guild = bot.get_guild(approval[1]) if approval[1] else None
+
+            if approval[2] == 0:
+                if user:
+                    await user.send(f"It has been 24 hours since you joined! Please answer the questions in <#{approval[3]}> to be approved! If you do not approve within the next 24 hours, you will be automatically kicked from the server. If you have any questions, please contact a staff member.")
+                if channel:
+                    await channel.send(f"24-hour reminder sent to {user.display_name}" if user else f"<@{approval[0]}> It has been 24 hours since you joined! Please answer the questions above to be approved! If you do not approve within the next 24 hours, you will be automatically kicked from the server. If you have any questions, please contact a staff member.")
+            elif approval[2] == 1:
+                if user:
+                    await user.send("You have been inactive for 48 hours, you have been removed from the server. If you would like to rejoin, please use the invite link again and answer the questions in the approval channel!")
+                if channel:
+                    await channel.send("User has been inactive for 48 hours, they will be removed from the server")
+                if guild and user:
+                    try:
+                        await guild.kick(user=user)
+                    except Exception as e:
+                        print(e)
+                        if channel:
+                            await channel.send("Unable to kick user, please do so manually")
                         cur.execute("UPDATE UserApprovals SET stage = 2 WHERE userId = ? AND serverId = ?", (approval[0], approval[1]))
                         conn.commit()
 
@@ -208,7 +191,7 @@ async def self(interaction: discord.Interaction, user: discord.Member, reason: s
     if interaction.user.guild_permissions.kick_members:
         await user.kick(reason = reason)
         await interaction.response.send_message(f"Kicked {user} for {reason}")
-        cur.execute("INSERT INTO Kicks (userId, serverId, reason, curTime) VALUES (?, ?, ?)", (user.id, interaction.guild.id, reason, int(time.time())))
+        cur.execute("INSERT INTO Kicks (userId, serverId, reason, curTime) VALUES (?, ?, ?, ?)", (user.id, interaction.guild.id, reason, int(time.time())))
         conn.commit()
     else:
         await interaction.response.send_message(f"⚠️ You do not have permission to use this command. You must have kick privileges ⚠️", ephemeral=True)
@@ -219,7 +202,7 @@ async def self(interaction: discord.Interaction, user: discord.Member, reason: s
     if interaction.user.guild_permissions.ban_members:
         await user.ban(reason = reason, delete_message_seconds=delete_message_minutes*60)
         await interaction.response.send_message(f"Banned {user} for {reason}")
-        cur.execute("INSERT INTO Bans (userId, serverId, reason, curTime) VALUES (?, ?, ?)", (user.id, interaction.guild.id, reason, int(time.time())))
+        cur.execute("INSERT INTO Bans (userId, serverId, reason, curTime) VALUES (?, ?, ?, ?)", (user.id, interaction.guild.id, reason, int(time.time())))
         conn.commit()
     else:
         await interaction.response.send_message(f"⚠️ You do not have permission to use this command. You must have ban privileges ⚠️", ephemeral=True)
@@ -239,7 +222,7 @@ async def self(interaction: discord.Interaction, userid: str, reason: str):
 @app_commands.describe(user = "The user to warn", reason = "The reason for warning the user")
 async def self(interaction: discord.Interaction, user: discord.Member, reason: str):
     if interaction.user.guild_permissions.kick_members:
-        cur.execute("INSERT INTO Warns (userId, serverId, reason, curTime) VALUES (?, ?, ?)", (user.id, interaction.guild.id, reason, int(time.time())))
+        cur.execute("INSERT INTO Warns (userId, serverId, reason, curTime) VALUES (?, ?, ?, ?)", (user.id, interaction.guild.id, reason, int(time.time())))
         conn.commit()
         await interaction.response.send_message(f"Warned {user} for {reason}")
 
@@ -300,9 +283,9 @@ async def self(interaction: discord.Interaction, user: discord.Member, trial: bo
         await interaction.response.send_message(f"Approved {user}")
         cur.execute("SELECT threadId, messageId FROM UserApprovals WHERE userId = ? AND serverId = ? AND (stage = 0 OR stage = 1)", (user.id, interaction.guild.id))
         result = cur.fetchone()
-        thread = bot.get_channel(result[0])
+        thread = await bot.fetch_channel(result[0])
         cur.execute("SELECT approvalLogChannelId FROM ServerSettings WHERE serverId = ?", (interaction.guild.id,))
-        channel = bot.get_channel(cur.fetchone()[0])
+        channel = await bot.fetch_channel(cur.fetchone()[0])
         await thread.delete()
         try:
             message = await channel.fetch_message(result[1])
@@ -316,7 +299,7 @@ async def self(interaction: discord.Interaction, user: discord.Member, trial: bo
         cur.execute("SELECT approvalMessageChannelId FROM ServerSettings WHERE serverId = ?", (interaction.guild.id,))
         result = cur.fetchone()
         if result[0] != None and result[0] != 0:
-            channel = bot.get_channel(result[0])
+            channel = await bot.fetch_channel(result[0])
             embed = discord.Embed(title="New Member Alert!", description=f"Give a warm welcome to {user.mention}!", color=0xffa500, timestamp=datetime.datetime.now())
             await channel.send(embed=embed)
             
@@ -401,6 +384,16 @@ async def self(interaction: discord.Interaction, roles: str):
     else:
         await interaction.response.send_message(f"⚠️ You do not have permission to use this command. You must have administrator privileges ⚠️", ephemeral=True)
 
+@tree.command(name="setlevelroles", description="Set the roles for the bot to give to users when they reach a certain level")
+@app_commands.describe(level = "The level to give the role at", role = "The role to give to users at the level")
+async def self(interaction: discord.Interaction, level: int, role: discord.Role):
+    if interaction.user.guild_permissions.administrator:
+        cur.execute("INSERT INTO LevelRoles (roleId, serverId, level) VALUES (?, ?, ?)", (role.id, interaction.guild.id, level))
+        conn.commit()
+        await interaction.response.send_message(f"Set the role {role.name} to be given at level {level}")
+    else:
+        await interaction.response.send_message(f"⚠️ You do not have permission to use this command. You must have administrator privileges ⚠️", ephemeral=True)
+
 @tree.command(name="settings", description="View the current settings")
 async def self(interaction: discord.Interaction):
     if interaction.user.guild_permissions.administrator:
@@ -447,7 +440,7 @@ async def approval(member):
     cur.execute("SELECT approvalChannelId, modRole FROM ServerSettings WHERE serverId = ?", (member.guild.id,))
     result = cur.fetchone()
     if result[0] != None and result[0] != 0:
-        channel = bot.get_channel(result[0])
+        channel = await bot.fetch_channel(result[0])
         message = await channel.send(f"Approval for {member.display_name}")
         thread = await message.create_thread(name=f"Approval for {member.display_name}")
         cur.execute("INSERT INTO UserApprovals (userId, serverId, messageId, threadId, curTime) VALUES (?, ?, ?, ?, ?)", (member.id, member.guild.id, message.id, thread.id, int(time.time())))
@@ -472,7 +465,7 @@ async def on_member_join(member):
     cur.execute("SELECT joinLeaveLogChannelId FROM ServerSettings WHERE serverId = ?", (member.guild.id,))
     result = cur.fetchone()
     if result[0] != None and result[0] != 0:
-        channel = member.guild.get_channel(result[0])
+        channel = await bot.fetch_channel(result[0])
         embed = discord.Embed(title = "Join Notification", description = f"<@{member.id}> (`{member}`) has joined the server!\n\n**Creation Date**\n`{member.created_at.strftime('%Y-%m-%d %H:%M:%S')}`", timestamp=datetime.datetime.now(), color=0xffa500)
         try:
             embed.set_thumbnail(url = member.avatar.url)
@@ -490,17 +483,17 @@ async def on_member_remove(member):
     if result != None:
         cur.execute("UPDATE UserApprovals SET stage = 2 WHERE userId = ? AND serverId = ?", (member.id, member.guild.id))
         conn.commit()
-        thread = bot.get_channel(result[3])
+        thread = await bot.fetch_channel(result[3])
         await thread.delete()
         cur.execute("SELECT approvalLogChannelId FROM ServerSettings WHERE serverId = ?", (member.guild.id,))
         result = cur.fetchone()
-        channel = bot.get_channel(result[0])
+        channel = await bot.fetch_channel(result[0])
         await channel.send(f"{member.name} left the server, approval cancelled", file=discord.File(f"./{thread.id}.txt"))
         os.remove(f"./{thread.id}.txt")
     cur.execute("SELECT joinLeaveLogChannelId FROM ServerSettings WHERE serverId = ?", (member.guild.id,))
     result = cur.fetchone()
     if result[0] != None and result[0] != 0:
-        channel = member.guild.get_channel(result[0])
+        channel = await bot.fetch_channel(result[0])
         roles = ""
         for role in member.roles:
             roles = roles + ", " + role.name
@@ -511,7 +504,20 @@ async def on_member_remove(member):
             pass
         embed.set_footer(text=f"There are now {member.guild.member_count} members.")
         await channel.send(embed=embed)
-        channel = bot.get_channel(1070455145877491902)
+
+    async for entry in member.guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
+        if entry.target == member:
+            cur.execute("INSERT INTO Kicks (userId, serverId, reason, curTime) VALUES (?, ?, ?, ?)", (member.id, member.guild.id, entry.reason, int(time.time())))
+            conn.commit()
+            cur.execute("SELECT actionLogChannelId FROM ServerSettings WHERE serverId = ?", (member.guild.id,))
+            result = cur.fetchone()
+            channel = await bot.fetch_channel(result[0])
+            embed = discord.Embed(title="Kick Notification", description=f"<@{entry.user.id}> (`{entry.user}`) has kicked <@{member.id}> (`{member}`) for {entry.reason}", timestamp=datetime.datetime.now(), color=0xff0000)
+            try:
+                embed.set_thumbnail(url = member.avatar.url)
+            except:
+                pass
+            await channel.send(embed=embed)
 
 @bot.event
 async def on_guild_join(guild):
@@ -524,13 +530,36 @@ async def on_guild_join(guild):
     await channel.send(f"Thanks for adding me to your server! To get started, use /help to see the commands that I have to offer! I recommend checking out the settings section first to set up the logging and approval channels, as well as the role settings! If you need any help, contact @felix.dev")
 
 @tree.command(name="dev", description="Developer commands")
-async def self(interaction: discord.Interaction, command: typing.Literal["Immitate Join"]):
+async def self(interaction: discord.Interaction, command: typing.Literal["Immitate Join", "Give Level Roles to All"]):
     if interaction.user.id == 546917684810481665:
         if command == "Immitate Join":
             await on_guild_join(interaction.guild)
             await interaction.response.send_message(f"Immitated join", ephemeral=True)
+        elif command == "Give Level Roles to All":
+            members = interaction.guild.members
+            for member in members:
+                print(member.id)
+                cur.execute("SELECT * FROM UserLevels WHERE serverId = ? AND userId = ?", (interaction.guild.id, member.id))
+                result = cur.fetchone()
+                print(result)
+                if result != None:
+                    member = await interaction.guild.fetch_member(result[0])
+                    print(member.name)
+                    if member != None:
+                        cur.execute("SELECT roleId FROM LevelRoles WHERE serverId = ? AND level <= ?", (interaction.guild.id, result[3]))
+                        result = cur.fetchall()
+                        print(result)
+                        if result != None:
+                            for role in result:
+                                print(role)
+                                levelrole = interaction.guild.get_role(role[0])
+                                await member.add_roles(levelrole)
+                                print(f"Gave {levelrole.name}")
+            await interaction.response.send_message(f"Gave level roles to all", ephemeral=True)
     else:
         await interaction.response.send_message(f"⚠️ You do not have permission to use this command. You must be Felix.Dev lol ⚠️", ephemeral=True)
+
+        
 
 def approvalLogging(message):
     cur.execute("SELECT * FROM UserApprovals WHERE ThreadId = ? AND (stage = 0 OR stage = 1)", (message.channel.id,))
@@ -561,7 +590,7 @@ async def levelSystem(message):
             cur.execute("SELECT levelUpChannelId FROM ServerSettings WHERE serverId = ?", (message.guild.id,))
             result = cur.fetchone()
             if result[0] != None and result[0] != 0:
-                channel = bot.get_channel(result[0])
+                channel = await bot.fetch_channel(result[0])
             else:
                 channel = message.channel
             if int(time.time()) - userLevelData[4] > 60:
@@ -570,6 +599,11 @@ async def levelSystem(message):
                 if nextLevelXp <= xp:
                     cur.execute("UPDATE UserLevels SET xp = ?, level = ?, lastMessageTime = ? WHERE userId = ? AND serverId = ?", (0 + (xp-nextLevelXp), userLevelData[3] + 1, int(time.time()), message.author.id, message.guild.id))
                     conn.commit()
+                    cur.execute("SELECT * FROM LevelRoles WHERE serverId = ? AND level = ?", (message.guild.id, userLevelData[3] + 1))
+                    result = cur.fetchone()
+                    if result != None:
+                        role = message.guild.get_role(result[0])
+                        await message.author.add_roles(role)
                     await channel.send(f"Congratulations {message.author.mention}! You have leveled up to level {userLevelData[3] + 1}!")
                 else:
                     cur.execute("UPDATE UserLevels SET xp = ?, lastMessageTime = ? WHERE userId = ? AND serverId = ?", (userLevelData[2] + xp, int(time.time()), message.author.id, message.guild.id))
@@ -620,7 +654,7 @@ async def self(interaction: discord.Interaction, user: discord.Member = None):
     draw = ImageDraw.Draw(background)
 
     # Define the font and font size for the text
-    font = ImageFont.truetype("arial.ttf", 18)
+    font = ImageFont.truetype("/opt/bots/.fonts/Arial.ttf", 18)
 
     # Define the text to display
     
@@ -665,7 +699,6 @@ async def self(interaction: discord.Interaction, user: discord.Member = None):
 
     # Save the modified image
     buffer = io.BytesIO()
-    background.resize((250, 75), resample=Image.LANCZOS)
     background.save(buffer, format="PNG")
     buffer.seek(0)
     file = discord.File(buffer, filename="output.png")
@@ -697,15 +730,40 @@ async def self(interaction: discord.Interaction, image: discord.Attachment = Non
 async def self(interaction: discord.Interaction):
     cur.execute("SELECT * FROM UserLevels WHERE serverId = ? ORDER BY level DESC, xp DESC", (interaction.guild.id,))
     result = cur.fetchall()
-    embed = discord.Embed(title = "Server Leaderboard", description = "", color = 0xffa500)
-    count = 1
-    for user in result:
-        member = interaction.guild.get_member(user[0])
-        if member != None:
-            embed.description += f"{count}. {member.mention} - Level {user[3]} - {user[2]}xp\n"
-            count += 1
-    
-    await interaction.response.send_message(embed=embed)
+    leaderboard = [result[i:i + 10] for i in range(0, len(result), 10)]  # Split the leaderboard into pages of 10
+    page = 0  # Start at page 0
+
+    def check(reaction, user):
+        return user == interaction.user and str(reaction.emoji) in ["⬅️", "➡️"]
+
+    msg = None
+    while True:
+        embed = discord.Embed(title = "Server Leaderboard", description = "", color = 0xffa500)
+        for i, user in enumerate(leaderboard[page], start=1):
+            embed.description += f"{i + page * 10}. <@{user[0]}> - Level {user[3]} - {user[2]}xp\n"
+
+        if msg is None:
+            await interaction.response.send_message("Leaderboard sent!", ephemeral=True)
+            msg = await interaction.channel.send(embed=embed)
+        else:
+            await msg.edit(embed=embed)
+
+        # Add reactions
+        await msg.add_reaction("⬅️")
+        await msg.add_reaction("➡️")
+
+        try:
+            reaction, user = await bot.wait_for("reaction_add", timeout=60.0, check=check)
+        except asyncio.TimeoutError:
+            return  # End after 60 seconds of inactivity
+        else:
+            if str(reaction.emoji) == "➡️" and page < len(leaderboard) - 1:
+                page += 1  # Go to next page
+            elif str(reaction.emoji) == "⬅️" and page > 0:
+                page -= 1  # Go to previous page
+
+            # Remove reactions
+            await msg.clear_reactions()
 
 @bot.event
 async def on_message(message):
@@ -717,33 +775,34 @@ async def on_member_ban(guild, member):
     cur.execute("SELECT actionLogChannelId FROM ServerSettings WHERE serverId = ?", (guild.id,))
     result = cur.fetchone()
     if result[0] != None and result[0] != 0:
-        channel = guild.get_channel(result[0])
-        await channel.send(f"{member.name} was banned")
+        channel = await bot.fetch_channel(result[0])
+        embed = discord.Embed(title = f"{member.name} was banned", description=f"Reason: {member.reason}", timestamp=datetime.datetime.now(), color=0xFF0000)
+        try:
+            embed.set_thumbnail(url = member.avatar.url)
+        except:
+            pass
+        await channel.send(embed=embed)
 
 @bot.event
 async def on_member_unban(guild, user):
     cur.execute("SELECT actionLogChannelId FROM ServerSettings WHERE serverId = ?", (guild.id,))
     result = cur.fetchone()
     if result[0] != None and result[0] != 0:
-        channel = guild.get_channel(result[0])
-        await channel.send(f"{user.name} was unbanned")
-
-@bot.event
-async def on_member_kick(guild, member):
-    cur.execute("SELECT actionLogChannelId FROM ServerSettings WHERE serverId = ?", (guild.id,))
-    result = cur.fetchone()
-    if result[0] != None and result[0] != 0:
-        channel = guild.get_channel(result[0])
-        await channel.send(f"{member.name} was kicked")
+        channel = await bot.fetch_channel(result[0])
+        embed = discord.Embed(title = f"{user.name} was unbanned", description=f"Reason: {user.reason}", timestamp=datetime.datetime.now(), color=0x00FF00)
+        try:
+            embed.set_thumbnail(url = user.avatar.url)
+        except:
+            pass
+        await channel.send(embed=embed)
 
 @bot.event
 async def on_message_delete(message):
     if message.author.bot == False:
         cur.execute("SELECT messageLogChannelId FROM ServerSettings WHERE serverId = ?", (message.guild.id,))
         result = cur.fetchone()
-        print(result)
         if result[0] != None and result[0] != 0:
-            channel = message.guild.get_channel(result[0])
+            channel = await bot.fetch_channel(result[0])
             embed = discord.Embed(title = f"{message.author} deleted a message in {message.channel.name}", description=f"Message {message.id} deleted from <#{message.channel.id}>\n**Content:** {message.content}", timestamp=datetime.datetime.now(), color=0xFF0000)
             attachmentNumber = 1
             for attachment in message.attachments:
@@ -756,7 +815,7 @@ async def on_bulk_message_delete(messages):
     cur.execute("SELECT messageLogChannelId FROM ServerSettings WHERE serverId = ?", (messages[0].guild.id,))
     result = cur.fetchone()
     if result[0] != None and result[0] != 0:
-        channel = messages[0].guild.get_channel(result[0])
+        channel = await bot.fetch_channel(result[0])
         allofmessages = ""
         for message in messages:
             if message.author.bot == False:
@@ -785,7 +844,7 @@ async def on_message_edit(before, after):
         result = cur.fetchone()
         if result[0] != None and result[0] != 0:
             if before.content != after.content:
-                channel = before.guild.get_channel(result[0])
+                channel = await bot.fetch_channel(result[0])
                 embed = discord.Embed(title = f"{before.author} edited a message in {before.channel.name}", description=f"Message {before.id} edited in <#{before.channel.id}>\n`Before:` {before.content}\n`After: ` {after.content}", timestamp=datetime.datetime.now(), color=0xffa500)
                 await channel.send(embed=embed)
 
